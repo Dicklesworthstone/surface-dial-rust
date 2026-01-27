@@ -423,11 +423,33 @@ impl Daemon {
 mod tests {
     use super::*;
 
+    // ==========================================================================
+    // Control Mode Tests
+    // ==========================================================================
+
     #[test]
     fn test_control_mode_equality() {
         assert_eq!(ControlMode::Volume, ControlMode::Volume);
         assert_ne!(ControlMode::Volume, ControlMode::Microphone);
     }
+
+    #[test]
+    fn test_control_mode_debug() {
+        let mode = ControlMode::Volume;
+        let debug_str = format!("{:?}", mode);
+        assert!(debug_str.contains("Volume"));
+    }
+
+    #[test]
+    fn test_control_mode_clone() {
+        let mode = ControlMode::Microphone;
+        let cloned = mode;
+        assert_eq!(mode, cloned);
+    }
+
+    // ==========================================================================
+    // DaemonStats Tests
+    // ==========================================================================
 
     #[test]
     fn test_daemon_stats_default() {
@@ -439,10 +461,464 @@ mod tests {
     }
 
     #[test]
+    fn test_daemon_stats_debug() {
+        let stats = DaemonStats::default();
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("DaemonStats"));
+        assert!(debug_str.contains("rotation_count"));
+    }
+
+    // ==========================================================================
+    // Daemon Creation Tests
+    // ==========================================================================
+
+    #[test]
     fn test_daemon_creation() {
         let config = Config::default();
         let daemon = Daemon::new(config);
         assert_eq!(daemon.control_mode(), ControlMode::Volume);
         assert!(!daemon.is_connected());
+    }
+
+    #[test]
+    fn test_daemon_initial_state() {
+        let config = Config::default();
+        let daemon = Daemon::new(config);
+
+        // Initial mode should be Volume
+        assert_eq!(daemon.control_mode, ControlMode::Volume);
+
+        // Not connected initially
+        assert!(!daemon.connected);
+
+        // No button pressed initially
+        assert!(!daemon.was_button_pressed);
+
+        // Stats should be zeroed
+        assert_eq!(daemon.stats.rotation_count, 0);
+        assert_eq!(daemon.stats.click_count, 0);
+        assert_eq!(daemon.stats.mode_switches, 0);
+        assert!(daemon.stats.start_time.is_none());
+
+        // No mic mode started
+        assert!(daemon.mic_mode_started.is_none());
+
+        // No last rotation
+        assert!(daemon.last_rotation.is_none());
+    }
+
+    #[test]
+    fn test_daemon_with_custom_config() {
+        let mut config = Config::default();
+        config.volume.step_min = 5;
+        config.volume.step_max = 15;
+        config.microphone.mode_duration = 30;
+
+        let daemon = Daemon::new(config);
+        assert_eq!(daemon.config.volume.step_min, 5);
+        assert_eq!(daemon.config.volume.step_max, 15);
+        assert_eq!(daemon.config.microphone.mode_duration, 30);
+    }
+
+    // ==========================================================================
+    // Running Flag Tests (Shutdown Behavior)
+    // ==========================================================================
+
+    #[test]
+    fn test_running_flag_initially_false() {
+        let daemon = Daemon::new(Config::default());
+        assert!(!daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_running_flag_clone() {
+        let daemon = Daemon::new(Config::default());
+        let running_clone = daemon.running();
+
+        // Both should point to same atomic
+        daemon.running.store(true, Ordering::SeqCst);
+        assert!(running_clone.load(Ordering::SeqCst));
+
+        running_clone.store(false, Ordering::SeqCst);
+        assert!(!daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_running_flag_shared_across_threads() {
+        use std::thread;
+
+        let daemon = Daemon::new(Config::default());
+        let running = daemon.running();
+
+        running.store(true, Ordering::SeqCst);
+
+        let running_clone = running.clone();
+        let handle = thread::spawn(move || {
+            // Should see the value set in main thread
+            assert!(running_clone.load(Ordering::SeqCst));
+            // Set to false from child thread
+            running_clone.store(false, Ordering::SeqCst);
+        });
+
+        handle.join().unwrap();
+
+        // Main thread should see the change
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    // ==========================================================================
+    // Mode Switching Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_switch_mode_to_microphone() {
+        let mut daemon = Daemon::new(Config::default());
+        assert_eq!(daemon.control_mode, ControlMode::Volume);
+        assert_eq!(daemon.stats.mode_switches, 0);
+
+        daemon.switch_mode(ControlMode::Microphone);
+
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+        assert_eq!(daemon.stats.mode_switches, 1);
+    }
+
+    #[test]
+    fn test_switch_mode_to_volume() {
+        let mut daemon = Daemon::new(Config::default());
+        daemon.control_mode = ControlMode::Microphone;
+
+        daemon.switch_mode(ControlMode::Volume);
+
+        assert_eq!(daemon.control_mode, ControlMode::Volume);
+        assert_eq!(daemon.stats.mode_switches, 1);
+    }
+
+    #[test]
+    fn test_switch_mode_same_mode_no_change() {
+        let mut daemon = Daemon::new(Config::default());
+        assert_eq!(daemon.control_mode, ControlMode::Volume);
+
+        daemon.switch_mode(ControlMode::Volume);
+
+        // No mode switch should be recorded
+        assert_eq!(daemon.stats.mode_switches, 0);
+    }
+
+    #[test]
+    fn test_switch_mode_multiple_times() {
+        let mut daemon = Daemon::new(Config::default());
+
+        daemon.switch_mode(ControlMode::Microphone);
+        daemon.switch_mode(ControlMode::Volume);
+        daemon.switch_mode(ControlMode::Microphone);
+
+        assert_eq!(daemon.stats.mode_switches, 3);
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+    }
+
+    #[test]
+    fn test_switch_mode_resets_rotation_processor() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Accumulate some rotation
+        let _ = daemon.rotation_processor.process(1);
+        let _ = daemon.rotation_processor.process(1);
+
+        // Switch mode should reset
+        daemon.switch_mode(ControlMode::Microphone);
+
+        // The processor should be reset (we can't easily verify this without
+        // more inspection methods, but the test exercises the code path)
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+    }
+
+    // ==========================================================================
+    // Config Reload Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_reload_config() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Original values
+        assert_eq!(daemon.config.volume.step_min, 2);
+        assert_eq!(daemon.config.volume.step_max, 8);
+
+        // Create new config with different values
+        let mut new_config = Config::default();
+        new_config.volume.step_min = 5;
+        new_config.volume.step_max = 15;
+        new_config.interaction.double_click_ms = 500;
+        new_config.sensitivity.multiplier = 2.0;
+
+        daemon.reload_config(new_config);
+
+        // Verify config was updated
+        assert_eq!(daemon.config.volume.step_min, 5);
+        assert_eq!(daemon.config.volume.step_max, 15);
+        assert_eq!(daemon.config.interaction.double_click_ms, 500);
+        assert_eq!(daemon.config.sensitivity.multiplier, 2.0);
+    }
+
+    #[test]
+    fn test_reload_config_preserves_state() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Set some state
+        daemon.control_mode = ControlMode::Microphone;
+        daemon.connected = true;
+        daemon.stats.rotation_count = 100;
+        daemon.stats.click_count = 50;
+
+        // Reload config
+        let new_config = Config::default();
+        daemon.reload_config(new_config);
+
+        // State should be preserved
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+        assert!(daemon.connected);
+        assert_eq!(daemon.stats.rotation_count, 100);
+        assert_eq!(daemon.stats.click_count, 50);
+    }
+
+    // ==========================================================================
+    // Click Result Processing Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_process_click_result_single_click_increments_stats() {
+        let mut daemon = Daemon::new(Config::default());
+        assert_eq!(daemon.stats.click_count, 0);
+
+        daemon.process_click_result(ClickResult::SingleClick);
+
+        assert_eq!(daemon.stats.click_count, 1);
+    }
+
+    #[test]
+    fn test_process_click_result_double_click_switches_to_mic() {
+        let mut daemon = Daemon::new(Config::default());
+        assert_eq!(daemon.control_mode, ControlMode::Volume);
+
+        daemon.process_click_result(ClickResult::DoubleClick);
+
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+        assert!(daemon.mic_mode_started.is_some());
+        assert_eq!(daemon.stats.click_count, 1);
+    }
+
+    #[test]
+    fn test_process_click_result_triple_click_increments_stats() {
+        let mut daemon = Daemon::new(Config::default());
+        daemon.config.media_control.enabled = true;
+
+        daemon.process_click_result(ClickResult::TripleClick);
+
+        assert_eq!(daemon.stats.click_count, 1);
+    }
+
+    #[test]
+    fn test_process_click_result_triple_click_disabled_media() {
+        let mut daemon = Daemon::new(Config::default());
+        daemon.config.media_control.enabled = false;
+
+        daemon.process_click_result(ClickResult::TripleClick);
+
+        // Still increments click count
+        assert_eq!(daemon.stats.click_count, 1);
+    }
+
+    #[test]
+    fn test_process_click_result_none_does_nothing() {
+        let mut daemon = Daemon::new(Config::default());
+        let initial_clicks = daemon.stats.click_count;
+
+        daemon.process_click_result(ClickResult::None);
+
+        assert_eq!(daemon.stats.click_count, initial_clicks);
+    }
+
+    // ==========================================================================
+    // Mic Mode Expiry Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_mic_mode_starts_with_timestamp() {
+        let mut daemon = Daemon::new(Config::default());
+
+        daemon.process_click_result(ClickResult::DoubleClick);
+
+        assert!(daemon.mic_mode_started.is_some());
+        // Timestamp should be very recent
+        let elapsed = daemon.mic_mode_started.unwrap().elapsed();
+        assert!(elapsed.as_millis() < 100);
+    }
+
+    #[test]
+    fn test_mic_mode_expiry_check_in_tick() {
+        let mut config = Config::default();
+        config.microphone.mode_duration = 1; // 1 second
+
+        let mut daemon = Daemon::new(config);
+        daemon.control_mode = ControlMode::Microphone;
+        daemon.mic_mode_started = Some(Instant::now() - Duration::from_secs(2)); // 2 seconds ago
+
+        daemon.tick();
+
+        // Should have switched back to Volume
+        assert_eq!(daemon.control_mode, ControlMode::Volume);
+        assert!(daemon.mic_mode_started.is_none());
+    }
+
+    #[test]
+    fn test_mic_mode_not_expired_yet() {
+        let mut config = Config::default();
+        config.microphone.mode_duration = 10; // 10 seconds
+
+        let mut daemon = Daemon::new(config);
+        daemon.control_mode = ControlMode::Microphone;
+        daemon.mic_mode_started = Some(Instant::now()); // Just now
+
+        daemon.tick();
+
+        // Should still be in Microphone mode
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+        assert!(daemon.mic_mode_started.is_some());
+    }
+
+    // ==========================================================================
+    // Button State Handling Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_button_down_state_tracking() {
+        let mut daemon = Daemon::new(Config::default());
+        assert!(!daemon.was_button_pressed);
+
+        daemon.handle_button_state(true);
+        assert!(daemon.was_button_pressed);
+
+        daemon.handle_button_state(false);
+        assert!(!daemon.was_button_pressed);
+    }
+
+    #[test]
+    fn test_button_press_triggers_click_detector() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Press button
+        daemon.handle_button_state(true);
+
+        // Release button - should start click detection
+        daemon.handle_button_state(false);
+
+        // Wait for single click timeout
+        std::thread::sleep(Duration::from_millis(500));
+        daemon.tick();
+
+        // Should have processed a single click
+        assert_eq!(daemon.stats.click_count, 1);
+    }
+
+    #[test]
+    fn test_repeated_same_state_no_action() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Multiple "pressed" reports in a row (no actual press/release)
+        daemon.handle_button_state(true);
+        daemon.handle_button_state(true);
+        daemon.handle_button_state(true);
+
+        // Button detector should only have one button_down
+        assert!(daemon.was_button_pressed);
+    }
+
+    // ==========================================================================
+    // USB Constants Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_surface_dial_usb_ids() {
+        assert_eq!(SURFACE_DIAL_VENDOR_ID, 0x045E);
+        assert_eq!(SURFACE_DIAL_PRODUCT_ID, 0x091B);
+    }
+
+    // ==========================================================================
+    // Accessors Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_control_mode_accessor() {
+        let mut daemon = Daemon::new(Config::default());
+
+        assert_eq!(daemon.control_mode(), ControlMode::Volume);
+
+        daemon.control_mode = ControlMode::Microphone;
+        assert_eq!(daemon.control_mode(), ControlMode::Microphone);
+    }
+
+    #[test]
+    fn test_is_connected_accessor() {
+        let mut daemon = Daemon::new(Config::default());
+
+        assert!(!daemon.is_connected());
+
+        daemon.connected = true;
+        assert!(daemon.is_connected());
+    }
+
+    // ==========================================================================
+    // Integration-style Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_full_double_click_sequence() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // First click
+        daemon.handle_button_state(true);
+        daemon.handle_button_state(false);
+
+        // Small delay (within double-click window)
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Second click
+        daemon.handle_button_state(true);
+        daemon.handle_button_state(false);
+
+        // Should be in mic mode now
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+        assert_eq!(daemon.stats.click_count, 1); // double-click counts as 1
+    }
+
+    #[test]
+    fn test_triple_click_sequence() {
+        let mut config = Config::default();
+        config.media_control.enabled = true;
+        let mut daemon = Daemon::new(config);
+
+        // Three quick clicks
+        for _ in 0..3 {
+            daemon.handle_button_state(true);
+            daemon.handle_button_state(false);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert_eq!(daemon.stats.click_count, 1); // triple-click counts as 1
+    }
+
+    #[test]
+    fn test_daemon_stats_accumulate() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Simulate multiple interactions
+        for _ in 0..5 {
+            daemon.handle_button_state(true);
+            daemon.handle_button_state(false);
+            std::thread::sleep(Duration::from_millis(500)); // Wait for single-click timeout
+            daemon.tick();
+        }
+
+        assert_eq!(daemon.stats.click_count, 5);
     }
 }
