@@ -217,6 +217,11 @@ CONF
     mkdir -p "${LAUNCH_AGENTS_DIR}"
 
     echo "Installing LaunchAgent..."
+    if [[ ! -f "${SCRIPT_DIR}/${PLIST_NAME}" ]]; then
+        echo "Error: LaunchAgent plist not found: ${SCRIPT_DIR}/${PLIST_NAME}"
+        echo "Please ensure you're running from the project directory."
+        exit 1
+    fi
     cp "${SCRIPT_DIR}/${PLIST_NAME}" "${LAUNCH_AGENTS_DIR}/"
 
     echo
@@ -312,6 +317,15 @@ main() {
     done
 
     print_header
+
+    # Validate architecture is supported
+    local arch
+    arch="$(detect_arch)"
+    if [[ "$arch" == "unknown" ]]; then
+        echo "Error: Unsupported architecture: $(uname -m)"
+        echo "Supported architectures: x86_64, aarch64 (arm64), armv7l"
+        exit 1
+    fi
 
     # Dispatch to platform-specific installer
     case "$(detect_os)" in
