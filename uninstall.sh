@@ -1,39 +1,61 @@
 #!/bin/bash
 set -e
 
-APP_PATH="/Applications/Surface Dial.app"
-PLIST_NAME="com.surface-dial.volume-controller.plist"
-LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
+# New installation paths (DIAL-fas)
+NEW_BINARY="${HOME}/.local/bin/surface-dial"
+NEW_PLIST="${HOME}/Library/LaunchAgents/com.surface-dial.plist"
+
+# Old installation paths (legacy)
+OLD_APP_PATH="/Applications/Surface Dial.app"
+OLD_PLIST="${HOME}/Library/LaunchAgents/com.surface-dial.volume-controller.plist"
+OLD_BINARY="/usr/local/bin/surface-dial"
 
 echo "=== Surface Dial Volume Controller Uninstaller ==="
 echo
 
-# Stop service if running
-if launchctl list 2>/dev/null | grep -q "${PLIST_NAME%.plist}"; then
-    echo "Stopping service..."
-    launchctl unload "${LAUNCH_AGENTS_DIR}/${PLIST_NAME}" 2>/dev/null || true
-fi
-
-# Kill any running instances
+# Stop services
+echo "Stopping service..."
+launchctl unload "$NEW_PLIST" 2>/dev/null || true
+launchctl unload "$OLD_PLIST" 2>/dev/null || true
 pkill -f "surface-dial" 2>/dev/null || true
+sleep 1
 
-# Remove plist
-if [ -f "${LAUNCH_AGENTS_DIR}/${PLIST_NAME}" ]; then
-    echo "Removing LaunchAgent..."
-    rm "${LAUNCH_AGENTS_DIR}/${PLIST_NAME}"
+# Remove new installation
+if [[ -f "$NEW_PLIST" ]]; then
+    echo "Removing LaunchAgent: ${NEW_PLIST}"
+    rm -f "$NEW_PLIST"
 fi
 
-# Remove app bundle
-if [ -d "${APP_PATH}" ]; then
-    echo "Removing app bundle..."
-    sudo rm -rf "${APP_PATH}"
+if [[ -f "$NEW_BINARY" ]]; then
+    echo "Removing binary: ${NEW_BINARY}"
+    rm -f "$NEW_BINARY"
 fi
 
-# Remove old binary if exists
-if [ -f "/usr/local/bin/surface-dial" ]; then
-    echo "Removing old binary..."
-    sudo rm "/usr/local/bin/surface-dial"
+# Remove old installation (legacy)
+if [[ -f "$OLD_PLIST" ]]; then
+    echo "Removing legacy LaunchAgent: ${OLD_PLIST}"
+    rm -f "$OLD_PLIST"
+fi
+
+if [[ -d "$OLD_APP_PATH" ]]; then
+    echo "Removing legacy app bundle: ${OLD_APP_PATH}"
+    sudo rm -rf "$OLD_APP_PATH"
+fi
+
+if [[ -f "$OLD_BINARY" ]]; then
+    echo "Removing legacy binary: ${OLD_BINARY}"
+    sudo rm -f "$OLD_BINARY"
 fi
 
 echo
-echo "=== Uninstallation Complete ==="
+echo "=== Uninstall Complete ==="
+echo
+echo "Removed all Surface Dial components."
+echo
+echo "Preserved (user data):"
+echo "  - Config: ~/Library/Application Support/surface-dial/"
+echo "  - Logs:   ~/.local/share/surface-dial/"
+echo
+echo "To remove all data:"
+echo "  rm -rf ~/.local/share/surface-dial"
+echo "  rm -rf ~/Library/Application\\ Support/surface-dial"

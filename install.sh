@@ -65,6 +65,7 @@ Options:
   --detect-only     Print detected platform and exit
   --from-release    Download pre-built binary from GitHub releases
   --build-local     Build from source (requires Rust toolchain)
+  --uninstall       Remove Surface Dial and its service
   --help            Show this help message
 
 Examples:
@@ -72,6 +73,7 @@ Examples:
   $0 --detect-only       # Just print platform detection result
   $0 --from-release      # Download pre-built binary
   $0 --build-local       # Build from source
+  $0 --uninstall         # Remove installation
 EOF
 }
 
@@ -91,15 +93,54 @@ build_from_source() {
 }
 
 # =============================================================================
-# macOS Installation
+# macOS Installation (DIAL-fas)
 # =============================================================================
 
+generate_macos_plist() {
+    local binary_path="$1"
+    local log_dir="$2"
+    cat << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.surface-dial</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>${binary_path}</string>
+        <string>daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>${log_dir}/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${log_dir}/stderr.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+EOF
+}
+
 install_macos() {
-    local APP_NAME="Surface Dial.app"
-    local APP_PATH="/Applications/${APP_NAME}"
-    local BUNDLE_ID="com.surface-dial.volume-controller"
-    local PLIST_NAME="com.surface-dial.volume-controller.plist"
-    local LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
+    local install_dir="${HOME}/.local/bin"
+    local plist_dir="${HOME}/Library/LaunchAgents"
+    local plist_file="${plist_dir}/com.surface-dial.plist"
+    local log_dir="${HOME}/.local/share/surface-dial"
+    local binary_path="${install_dir}/surface-dial"
 
     echo "Installing for macOS..."
     echo
@@ -107,147 +148,103 @@ install_macos() {
     # Build or download binary
     if [[ "${INSTALL_MODE:-auto}" == "build" ]] || { [[ "${INSTALL_MODE:-auto}" == "auto" ]] && check_rust_toolchain; }; then
         build_from_source
-        BINARY_PATH="${SCRIPT_DIR}/target/release/surface-dial"
+        local src_binary="${SCRIPT_DIR}/target/release/surface-dial"
     else
         echo "Error: Pre-built release download not yet implemented."
         echo "Please install Rust and run with --build-local"
         exit 1
     fi
 
+    # Stop existing service (if any)
     echo "Stopping existing service (if any)..."
-    launchctl unload "${LAUNCH_AGENTS_DIR}/${PLIST_NAME}" 2>/dev/null || true
+    launchctl unload "$plist_file" 2>/dev/null || true
     pkill -f "surface-dial" 2>/dev/null || true
+    sleep 1
 
-    STAGE_DIR="$(mktemp -d)"
-    trap 'rm -rf "$STAGE_DIR"' EXIT
+    # Create directories
+    echo "Creating directories..."
+    mkdir -p "$install_dir" "$plist_dir" "$log_dir"
 
-    APP_STAGE="${STAGE_DIR}/${APP_NAME}"
-    echo "Creating app bundle (staging): ${APP_STAGE}"
-    mkdir -p "${APP_STAGE}/Contents/MacOS"
-    mkdir -p "${APP_STAGE}/Contents/Resources"
+    # Install binary
+    echo "Installing binary to: ${binary_path}"
+    cp "$src_binary" "$binary_path"
+    chmod +x "$binary_path"
 
-    cp "$BINARY_PATH" "${APP_STAGE}/Contents/MacOS/surface-dial"
-    chmod +x "${APP_STAGE}/Contents/MacOS/surface-dial"
+    # Ad-hoc sign the binary (required for Apple Silicon)
+    echo "Signing binary..."
+    codesign --force --sign - "$binary_path" 2>/dev/null || true
 
-    cat > "${APP_STAGE}/Contents/Info.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>${BUNDLE_ID}</string>
-    <key>CFBundleName</key>
-    <string>Surface Dial</string>
-    <key>CFBundleDisplayName</key>
-    <string>Surface Dial</string>
-    <key>CFBundleExecutable</key>
-    <string>surface-dial</string>
-    <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-    echo "Signing app bundle..."
-    SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/\"/ { print $2; exit }' || true)"
-    if [[ -z "${SIGNING_IDENTITY}" ]]; then
-        CERT_NAME="Surface Dial Local Code Signing"
-        if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${CERT_NAME}"; then
-            SIGNING_IDENTITY="${CERT_NAME}"
-        else
-            echo "No code signing identity found; creating a local one (${CERT_NAME})..."
-            CERT_DIR="${STAGE_DIR}/codesign"
-            mkdir -p "${CERT_DIR}"
-            cat > "${CERT_DIR}/openssl.cnf" << 'CONF'
-[req]
-distinguished_name = dn
-x509_extensions = v3_req
-prompt = no
-
-[dn]
-CN = Surface Dial Local Code Signing
-
-[v3_req]
-keyUsage = critical, digitalSignature
-extendedKeyUsage = codeSigning
-basicConstraints = critical, CA:FALSE
-CONF
-
-            openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-                -keyout "${CERT_DIR}/key.pem" \
-                -out "${CERT_DIR}/cert.pem" \
-                -config "${CERT_DIR}/openssl.cnf" >/dev/null 2>&1
-
-            openssl pkcs12 -export -out "${CERT_DIR}/codesign.p12" \
-                -inkey "${CERT_DIR}/key.pem" -in "${CERT_DIR}/cert.pem" \
-                -passout pass: >/dev/null 2>&1
-
-            security import "${CERT_DIR}/codesign.p12" \
-                -k "${HOME}/Library/Keychains/login.keychain-db" \
-                -P "" -T /usr/bin/codesign >/dev/null 2>&1 || true
-
-            if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${CERT_NAME}"; then
-                SIGNING_IDENTITY="${CERT_NAME}"
-            fi
-        fi
-    fi
-
-    if [[ -n "${SIGNING_IDENTITY}" ]]; then
-        echo "Using signing identity: ${SIGNING_IDENTITY}"
-        codesign --force --deep --sign "${SIGNING_IDENTITY}" --identifier "${BUNDLE_ID}" "${APP_STAGE}"
-    else
-        echo "Falling back to ad-hoc signing (permissions may need re-approval after updates)."
-        codesign --force --deep --sign - --identifier "${BUNDLE_ID}" "${APP_STAGE}"
-    fi
-
-    echo "Installing app bundle to: ${APP_PATH}"
-    sudo rm -rf "${APP_PATH}"
-    sudo ditto "${APP_STAGE}" "${APP_PATH}"
-
-    mkdir -p "${LAUNCH_AGENTS_DIR}"
-
+    # Generate and install plist
     echo "Installing LaunchAgent..."
-    if [[ ! -f "${SCRIPT_DIR}/${PLIST_NAME}" ]]; then
-        echo "Error: LaunchAgent plist not found: ${SCRIPT_DIR}/${PLIST_NAME}"
-        echo "Please ensure you're running from the project directory."
-        exit 1
-    fi
-    cp "${SCRIPT_DIR}/${PLIST_NAME}" "${LAUNCH_AGENTS_DIR}/"
+    generate_macos_plist "$binary_path" "$log_dir" > "$plist_file"
 
+    # Permissions notice
     echo
-    echo "Requesting required macOS permissions (you must toggle them ON once)."
-    /usr/bin/open -n -a "${APP_PATH}" --args --setup || true
+    echo "┌─────────────────────────────────────────────────────────────┐"
+    echo "│  macOS requires Input Monitoring permission for HID access │"
+    echo "└─────────────────────────────────────────────────────────────┘"
     echo
-    echo "Enable permissions for 'Surface Dial' in:"
-    echo "  System Settings -> Privacy & Security -> Input Monitoring"
-    echo "  System Settings -> Privacy & Security -> Accessibility"
+    echo "When prompted, enable permissions for 'surface-dial' in:"
+    echo "  System Settings → Privacy & Security → Input Monitoring"
     echo
-    read -r -p "Press Enter once both toggles are enabled... " _
+    echo "If not prompted, manually add the binary:"
+    echo "  ${binary_path}"
+    echo
 
+    # Load the service
     echo "Starting service..."
-    launchctl load "${LAUNCH_AGENTS_DIR}/${PLIST_NAME}"
+    launchctl load "$plist_file"
+
+    # Verify it started
+    sleep 1
+    if launchctl list | grep -q "com.surface-dial"; then
+        echo
+        echo "=== Installation Complete ==="
+        echo
+        echo "The Surface Dial volume controller is now running."
+        echo
+        echo "Logs:     ${log_dir}/"
+        echo "Binary:   ${binary_path}"
+        echo "Config:   ~/Library/Application Support/surface-dial/config.toml"
+        echo
+        echo "Commands:"
+        echo "  View logs:    tail -f ${log_dir}/stderr.log"
+        echo "  Status:       launchctl list | grep surface-dial"
+        echo "  Stop:         launchctl unload ${plist_file}"
+        echo "  Start:        launchctl load ${plist_file}"
+        echo "  Uninstall:    $0 --uninstall"
+    else
+        echo
+        echo "Warning: Service may not have started. Check permissions."
+        echo "Try: launchctl load ${plist_file}"
+    fi
+}
+
+uninstall_macos() {
+    local plist_file="${HOME}/Library/LaunchAgents/com.surface-dial.plist"
+    local binary_path="${HOME}/.local/bin/surface-dial"
+
+    echo "Uninstalling Surface Dial..."
+
+    # Stop and remove service
+    launchctl unload "$plist_file" 2>/dev/null || true
+    rm -f "$plist_file"
+
+    # Remove binary
+    rm -f "$binary_path"
 
     echo
-    echo "=== Installation Complete ==="
+    echo "=== Uninstall Complete ==="
     echo
-    echo "The Surface Dial volume controller is now running."
-    echo "Logs: /tmp/surface-dial.log"
+    echo "Removed:"
+    echo "  - LaunchAgent: ${plist_file}"
+    echo "  - Binary: ${binary_path}"
     echo
-    echo "Commands:"
-    echo "  View logs:    tail -f /tmp/surface-dial.log"
-    echo "  Stop:         launchctl unload ~/Library/LaunchAgents/${PLIST_NAME}"
-    echo "  Start:        launchctl load ~/Library/LaunchAgents/${PLIST_NAME}"
-    echo "  Uninstall:    ./uninstall.sh"
+    echo "Preserved (user data):"
+    echo "  - Config: ~/Library/Application Support/surface-dial/"
+    echo "  - Logs:   ~/.local/share/surface-dial/"
+    echo
+    echo "To remove all data: rm -rf ~/.local/share/surface-dial ~/Library/Application\\ Support/surface-dial"
 }
 
 # =============================================================================
@@ -288,6 +285,7 @@ install_windows() {
 
 main() {
     INSTALL_MODE="auto"
+    ACTION="install"
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -302,6 +300,10 @@ main() {
                 ;;
             --build-local)
                 INSTALL_MODE="build"
+                shift
+                ;;
+            --uninstall)
+                ACTION="uninstall"
                 shift
                 ;;
             --help|-h)
@@ -327,15 +329,27 @@ main() {
         exit 1
     fi
 
-    # Dispatch to platform-specific installer
+    # Dispatch to platform-specific installer/uninstaller
     case "$(detect_os)" in
         macos)
-            install_macos
+            if [[ "$ACTION" == "uninstall" ]]; then
+                uninstall_macos
+            else
+                install_macos
+            fi
             ;;
         linux)
+            if [[ "$ACTION" == "uninstall" ]]; then
+                echo "Error: Linux uninstaller not yet implemented."
+                exit 1
+            fi
             install_linux
             ;;
         windows)
+            if [[ "$ACTION" == "uninstall" ]]; then
+                echo "Error: Windows uninstaller not yet implemented."
+                exit 1
+            fi
             install_windows
             ;;
         *)
