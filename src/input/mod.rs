@@ -447,4 +447,414 @@ mod tests {
         let recent = Instant::now() - Duration::from_millis(50);
         assert_eq!(calculate_step(Some(recent), 2, 8, 80, 400), 8);
     }
+
+    // ==========================================================================
+    // Additional calculate_step Tests (Pure Function - No Mocks Needed)
+    // ==========================================================================
+
+    #[test]
+    fn test_calculate_step_at_fast_boundary() {
+        // Exactly at fast threshold
+        let at_fast = Instant::now() - Duration::from_millis(80);
+        assert_eq!(calculate_step(Some(at_fast), 2, 8, 80, 400), 8);
+    }
+
+    #[test]
+    fn test_calculate_step_at_slow_boundary() {
+        // Exactly at slow threshold
+        let at_slow = Instant::now() - Duration::from_millis(400);
+        assert_eq!(calculate_step(Some(at_slow), 2, 8, 80, 400), 2);
+    }
+
+    #[test]
+    fn test_calculate_step_interpolation_midpoint() {
+        // Midpoint between fast (80ms) and slow (400ms) = 240ms
+        // Range is 320ms, midpoint is 160ms into range
+        // ratio = 1.0 - (160/320) = 0.5
+        // step = 2 + 0.5 * 6 = 5
+        let midpoint = Instant::now() - Duration::from_millis(240);
+        let step = calculate_step(Some(midpoint), 2, 8, 80, 400);
+        assert!(step >= 4 && step <= 6, "Expected step 4-6, got {}", step);
+    }
+
+    #[test]
+    fn test_calculate_step_various_ranges() {
+        // Test with different min/max values
+        assert_eq!(calculate_step(None, 1, 10, 80, 400), 1);
+        assert_eq!(calculate_step(None, 5, 5, 80, 400), 5); // min == max
+
+        let fast = Instant::now() - Duration::from_millis(50);
+        assert_eq!(calculate_step(Some(fast), 1, 20, 80, 400), 20);
+        assert_eq!(calculate_step(Some(fast), 10, 10, 80, 400), 10);
+    }
+
+    #[test]
+    fn test_calculate_step_zero_elapsed() {
+        // Instant::now() - 0ms = now, should be fast
+        let now = Instant::now();
+        assert_eq!(calculate_step(Some(now), 2, 8, 80, 400), 8);
+    }
+
+    #[test]
+    fn test_calculate_step_very_old() {
+        // Very old rotation (10 seconds ago)
+        let old = Instant::now() - Duration::from_secs(10);
+        assert_eq!(calculate_step(Some(old), 2, 8, 80, 400), 2);
+    }
+
+    // ==========================================================================
+    // Additional RotationProcessor Tests (Real Unit Tests)
+    // ==========================================================================
+
+    #[test]
+    fn test_rotation_processor_accumulation() {
+        let config = SensitivityConfig {
+            dead_zone: 5,
+            multiplier: 1.0,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        // Accumulate within dead zone
+        assert_eq!(processor.process(2), None);
+        assert_eq!(processor.process(2), None);
+        // Now at 4, still in dead zone
+        assert_eq!(processor.process(1), None);
+        // Now at 5, exactly at dead zone edge, still None
+        assert_eq!(processor.process(1), Some(6)); // 6 > 5, triggers
+    }
+
+    #[test]
+    fn test_rotation_processor_bidirectional_accumulation() {
+        let config = SensitivityConfig {
+            dead_zone: 3,
+            multiplier: 1.0,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        // Positive accumulation
+        assert_eq!(processor.process(2), None);
+        // Negative cancels out
+        assert_eq!(processor.process(-2), None);
+        // Now at 0, need to exceed dead zone again
+        assert_eq!(processor.process(-4), Some(-4));
+    }
+
+    #[test]
+    fn test_rotation_processor_multiplier_rounding() {
+        let config = SensitivityConfig {
+            dead_zone: 0,
+            multiplier: 1.5,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        // 3 * 1.5 = 4.5, rounds to 4 or 5
+        let result = processor.process(3).unwrap();
+        assert!(result == 4 || result == 5);
+
+        // 2 * 1.5 = 3.0, exactly 3
+        assert_eq!(processor.process(2), Some(3));
+    }
+
+    #[test]
+    fn test_rotation_processor_large_multiplier() {
+        let config = SensitivityConfig {
+            dead_zone: 0,
+            multiplier: 5.0,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        assert_eq!(processor.process(1), Some(5));
+        assert_eq!(processor.process(-2), Some(-10));
+    }
+
+    #[test]
+    fn test_rotation_processor_small_multiplier() {
+        let config = SensitivityConfig {
+            dead_zone: 0,
+            multiplier: 0.1,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        // 10 * 0.1 = 1.0
+        assert_eq!(processor.process(10), Some(1));
+        // 5 * 0.1 = 0.5, rounds to 0 or 1
+        let result = processor.process(5).unwrap();
+        assert!(result >= 0 && result <= 1);
+    }
+
+    #[test]
+    fn test_rotation_processor_reset() {
+        let config = SensitivityConfig {
+            dead_zone: 5,
+            multiplier: 1.0,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        // Accumulate some
+        processor.process(3);
+        processor.process(2);
+        // Reset
+        processor.reset();
+        // Should need to accumulate again
+        assert_eq!(processor.process(3), None);
+    }
+
+    #[test]
+    fn test_rotation_processor_config_update() {
+        let config = SensitivityConfig {
+            dead_zone: 5,
+            multiplier: 1.0,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        // Change config to no dead zone
+        processor.update_config(SensitivityConfig {
+            dead_zone: 0,
+            multiplier: 2.0,
+            invert: true,
+        });
+
+        // Should now use new config
+        assert_eq!(processor.process(3), Some(-6)); // inverted, multiplied
+    }
+
+    #[test]
+    fn test_rotation_processor_extreme_values() {
+        let config = SensitivityConfig {
+            dead_zone: 0,
+            multiplier: 1.0,
+            invert: false,
+        };
+        let mut processor = RotationProcessor::new(config);
+
+        // i8 min/max values
+        assert_eq!(processor.process(127), Some(127));
+        assert_eq!(processor.process(-128), Some(-128));
+    }
+
+    // ==========================================================================
+    // Additional ClickDetector Tests (State Machine - Real Behavior)
+    // ==========================================================================
+
+    #[test]
+    fn test_click_detector_reset() {
+        let config = ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 300,
+            long_press_ms: 500,
+        };
+        let mut detector = ClickDetector::new(config);
+
+        // Start a click
+        detector.button_down();
+        detector.button_up();
+
+        // Reset mid-sequence
+        detector.reset();
+
+        // Should be in clean state
+        assert!(!detector.button_down);
+        assert!(!detector.long_press_fired);
+    }
+
+    #[test]
+    fn test_click_detector_triple_click_sequence() {
+        // Note: Current implementation returns DoubleClick on 2nd click and resets state.
+        // The 3rd click starts a new sequence. True triple-click detection would require
+        // a delayed/pending state machine that waits before confirming double-click.
+        let config = ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 400,
+            long_press_ms: 1000,
+        };
+        let mut detector = ClickDetector::new(config);
+
+        // Three quick clicks - tests actual behavior
+        detector.button_down();
+        let result1 = detector.button_up();
+        assert_eq!(result1, ClickResult::None); // First click: pending
+        sleep(Duration::from_millis(50));
+
+        detector.button_down();
+        let result2 = detector.button_up();
+        assert_eq!(result2, ClickResult::DoubleClick); // Second click: double-click fires
+        sleep(Duration::from_millis(50));
+
+        detector.button_down();
+        let result3 = detector.button_up();
+        assert_eq!(result3, ClickResult::None); // Third click: state was reset, starts new sequence
+    }
+
+    #[test]
+    fn test_click_detector_is_long_pressing() {
+        let config = ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 300,
+            long_press_ms: 100,
+        };
+        let mut detector = ClickDetector::new(config);
+
+        assert!(!detector.is_long_pressing());
+
+        detector.button_down();
+        assert!(!detector.is_long_pressing()); // Not yet
+
+        sleep(Duration::from_millis(150));
+        detector.tick();
+        assert!(detector.is_long_pressing()); // Now it is
+
+        detector.button_up();
+        assert!(!detector.is_long_pressing()); // Released
+    }
+
+    #[test]
+    fn test_click_detector_config_update() {
+        let config = ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 300,
+            long_press_ms: 1000,
+        };
+        let mut detector = ClickDetector::new(config);
+
+        // Update to faster long press
+        detector.update_config(ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 300,
+            long_press_ms: 50,
+        });
+
+        detector.button_down();
+        sleep(Duration::from_millis(100));
+        assert_eq!(detector.tick(), ClickResult::LongPressStart);
+    }
+
+    #[test]
+    fn test_click_detector_button_already_pressed() {
+        let config = ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 300,
+            long_press_ms: 500,
+        };
+        let mut detector = ClickDetector::new(config);
+
+        // First press
+        assert_eq!(detector.button_down(), ClickResult::None);
+        // Second press while already pressed - should be ignored
+        assert_eq!(detector.button_down(), ClickResult::None);
+    }
+
+    #[test]
+    fn test_click_detector_release_without_press() {
+        let config = ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 300,
+            long_press_ms: 500,
+        };
+        let mut detector = ClickDetector::new(config);
+
+        // Release without prior press - should be ignored
+        assert_eq!(detector.button_up(), ClickResult::None);
+    }
+
+    #[test]
+    fn test_click_detector_long_press_cancels_click() {
+        let config = ClickConfig {
+            double_click_ms: 200,
+            triple_click_ms: 300,
+            long_press_ms: 100,
+        };
+        let mut detector = ClickDetector::new(config);
+
+        detector.button_down();
+        sleep(Duration::from_millis(150));
+        detector.tick(); // Triggers LongPressStart
+
+        // Release after long press should be LongPressEnd, not a click
+        assert_eq!(detector.button_up(), ClickResult::LongPressEnd);
+
+        // No pending click
+        sleep(Duration::from_millis(250));
+        assert_eq!(detector.tick(), ClickResult::None);
+    }
+
+    // ==========================================================================
+    // ClickConfig Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_click_config_default() {
+        let config = ClickConfig::default();
+        assert_eq!(config.double_click_ms, 400);
+        assert_eq!(config.triple_click_ms, 600);
+        assert_eq!(config.long_press_ms, 1000);
+    }
+
+    #[test]
+    fn test_click_config_from_interaction_config() {
+        let interaction = crate::config::InteractionConfig {
+            double_click_ms: 300,
+            triple_click_ms: 500,
+            long_press_ms: 800,
+        };
+        let click_config = ClickConfig::from_config(&interaction);
+        assert_eq!(click_config.double_click_ms, 300);
+        assert_eq!(click_config.triple_click_ms, 500);
+        assert_eq!(click_config.long_press_ms, 800);
+    }
+
+    // ==========================================================================
+    // SensitivityConfig Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_sensitivity_config_default() {
+        let config = SensitivityConfig::default();
+        assert_eq!(config.dead_zone, 0);
+        assert!((config.multiplier - 1.0).abs() < f64::EPSILON);
+        assert!(!config.invert);
+    }
+
+    #[test]
+    fn test_sensitivity_config_from_config() {
+        let sens = crate::config::SensitivityConfig {
+            dead_zone: 5,
+            multiplier: 2.5,
+            invert: true,
+            preset: "custom".to_string(),
+        };
+        let config = SensitivityConfig::from_config(&sens);
+        assert_eq!(config.dead_zone, 5);
+        assert!((config.multiplier - 2.5).abs() < f64::EPSILON);
+        assert!(config.invert);
+    }
+
+    // ==========================================================================
+    // ClickResult Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_click_result_equality() {
+        assert_eq!(ClickResult::None, ClickResult::None);
+        assert_eq!(ClickResult::SingleClick, ClickResult::SingleClick);
+        assert_eq!(ClickResult::DoubleClick, ClickResult::DoubleClick);
+        assert_eq!(ClickResult::TripleClick, ClickResult::TripleClick);
+        assert_eq!(ClickResult::LongPressStart, ClickResult::LongPressStart);
+        assert_eq!(ClickResult::LongPressEnd, ClickResult::LongPressEnd);
+
+        assert_ne!(ClickResult::SingleClick, ClickResult::DoubleClick);
+    }
+
+    #[test]
+    fn test_click_result_debug() {
+        let result = ClickResult::SingleClick;
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("SingleClick"));
+    }
 }
