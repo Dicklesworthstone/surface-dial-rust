@@ -5,14 +5,23 @@
 
 use super::*;
 use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// Default mic volume to restore when unmuting (if no previous volume saved)
+const DEFAULT_MIC_VOLUME: i32 = 50;
 
 /// macOS platform implementation
-pub struct MacOS;
+pub struct MacOS {
+    /// Saved mic volume for restore after unmute (atomic for thread safety)
+    saved_mic_volume: AtomicI32,
+}
 
 impl MacOS {
     /// Create a new macOS platform instance
     pub fn new() -> Self {
-        Self
+        Self {
+            saved_mic_volume: AtomicI32::new(DEFAULT_MIC_VOLUME),
+        }
     }
 
     /// Run an osascript command and return stdout
@@ -110,10 +119,13 @@ impl Platform for MacOS {
     fn toggle_mic_mute(&self) -> PlatformResult<()> {
         let current = self.get_mic_volume()?;
         if current > 0 {
+            // Save current volume before muting
+            self.saved_mic_volume.store(current, Ordering::SeqCst);
             self.set_mic_volume(0)
         } else {
-            // Restore to 50% when unmuting
-            self.set_mic_volume(50)
+            // Restore to saved volume when unmuting
+            let restore_to = self.saved_mic_volume.load(Ordering::SeqCst);
+            self.set_mic_volume(restore_to)
         }
     }
 

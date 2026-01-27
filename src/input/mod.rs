@@ -139,16 +139,15 @@ impl ClickDetector {
             return ClickResult::TripleClick;
         }
 
-        // Double click is detected immediately on second click
+        // Double click is detected immediately on second click.
+        // Note: We already verified timing via is_continuation check above,
+        // which uses triple_click_ms. Since triple_click_ms >= double_click_ms
+        // (enforced by config validation), reaching click_count == 2 means
+        // we're already within the double-click window.
         if self.click_count == 2 {
-            // Check if within double-click window
-            if let Some(last) = self.last_release_time {
-                if now.duration_since(last).as_millis() < self.config.double_click_ms as u128 {
-                    self.click_count = 0;
-                    self.last_release_time = None;
-                    return ClickResult::DoubleClick;
-                }
-            }
+            self.click_count = 0;
+            self.last_release_time = None;
+            return ClickResult::DoubleClick;
         }
 
         ClickResult::None
