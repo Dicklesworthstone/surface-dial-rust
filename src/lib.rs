@@ -11,6 +11,7 @@
 //! - [`input`] - Click detection and rotation sensitivity processing
 //! - [`daemon`] - Main daemon loop implementation
 //! - [`hid`] - HID device abstraction for testing
+//! - [`pidfile`] - PID file management for daemon lifecycle
 
 pub mod cli;
 pub mod config;
@@ -18,4 +19,5 @@ pub mod daemon;
 pub mod hid;
 pub mod input;
 pub mod logging;
+pub mod pidfile;
 pub mod platform;
