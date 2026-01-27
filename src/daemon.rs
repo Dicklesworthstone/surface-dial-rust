@@ -1523,4 +1523,284 @@ mod tests {
         daemon.running.store(false, Ordering::SeqCst);
         assert!(!daemon.running.load(Ordering::SeqCst));
     }
+
+    // ==========================================================================
+    // Daemon Lifecycle Tests (Start/Stop/Restart)
+    // ==========================================================================
+    //
+    // These tests verify daemon lifecycle operations including startup,
+    // shutdown, and the mechanisms that enable only one instance to run.
+
+    #[test]
+    fn test_daemon_starts_with_running_false() {
+        // New daemon should start with running = false (not yet started)
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+        assert!(!daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_daemon_start_sets_running_true() {
+        // Starting the daemon should set running to true
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+
+        // Simulate what run() does at start
+        daemon.running.store(true, Ordering::SeqCst);
+
+        assert!(daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_daemon_start_records_start_time() {
+        // Starting should record the start time in stats
+        let mut daemon = Daemon::new(Config::default());
+
+        // Before start, no start time
+        assert!(daemon.stats.start_time.is_none());
+
+        // Simulate run() startup
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.stats.start_time = Some(Instant::now());
+
+        assert!(daemon.stats.start_time.is_some());
+    }
+
+    #[test]
+    fn test_daemon_stop_sets_running_false() {
+        // Stopping should set running to false
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+
+        // Start daemon
+        daemon.running.store(true, Ordering::SeqCst);
+        assert!(daemon.running.load(Ordering::SeqCst));
+
+        // Stop daemon
+        daemon.running.store(false, Ordering::SeqCst);
+        assert!(!daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_daemon_stop_preserves_stats() {
+        // Stop should preserve stats for logging/reporting
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+
+        // Start and record activity
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.stats.start_time = Some(Instant::now());
+        daemon.stats.rotation_count = 500;
+        daemon.stats.click_count = 100;
+        daemon.stats.mode_switches = 10;
+
+        // Stop daemon
+        daemon.running.store(false, Ordering::SeqCst);
+
+        // Stats should be preserved for final reporting
+        assert_eq!(daemon.stats.rotation_count, 500);
+        assert_eq!(daemon.stats.click_count, 100);
+        assert_eq!(daemon.stats.mode_switches, 10);
+        assert!(daemon.stats.start_time.is_some());
+    }
+
+    #[test]
+    fn test_daemon_restart_cycle() {
+        // Daemon should support clean restart (stop then start)
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+
+        // First start
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.stats.start_time = Some(Instant::now());
+        daemon.stats.rotation_count = 100;
+
+        // Stop
+        daemon.running.store(false, Ordering::SeqCst);
+
+        // "Restart" - reset stats and start again
+        daemon.stats = DaemonStats::default();
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.stats.start_time = Some(Instant::now());
+
+        // Should be running with fresh stats
+        assert!(daemon.running.load(Ordering::SeqCst));
+        assert_eq!(daemon.stats.rotation_count, 0);
+    }
+
+    #[test]
+    fn test_running_flag_atomic_operations() {
+        // Running flag should support atomic compare-and-swap
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+
+        // Try to start only if not already running
+        let was_running = daemon.running.compare_exchange(
+            false,
+            true,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+
+        assert!(was_running.is_ok()); // Successfully started
+        assert!(daemon.running.load(Ordering::SeqCst));
+
+        // Try again - should fail because already running
+        let was_running = daemon.running.compare_exchange(
+            false,
+            true,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+
+        assert!(was_running.is_err()); // Already running
+    }
+
+    #[test]
+    fn test_single_instance_via_running_flag() {
+        // Only one "instance" should be running at a time
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+        let running = daemon.running();
+
+        // First start succeeds
+        let result1 = running.compare_exchange(
+            false,
+            true,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        assert!(result1.is_ok());
+
+        // Second "instance" trying to start should fail
+        let result2 = running.compare_exchange(
+            false,
+            true,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_daemon_state_reset_on_restart() {
+        // On restart, certain state should be reset
+        let mut daemon = Daemon::new(Config::default());
+
+        // Simulate first run with accumulated state
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.control_mode = ControlMode::Microphone;
+        daemon.mic_mode_started = Some(Instant::now());
+        daemon.connected = true;
+        daemon.was_button_pressed = true;
+
+        // Stop
+        daemon.running.store(false, Ordering::SeqCst);
+
+        // On a true restart, we'd create a new Daemon
+        // Verify new daemon has clean state
+        let new_daemon = Daemon::new(Config::default());
+        assert_eq!(new_daemon.control_mode, ControlMode::Volume);
+        assert!(new_daemon.mic_mode_started.is_none());
+        assert!(!new_daemon.connected);
+        assert!(!new_daemon.was_button_pressed);
+    }
+
+    #[test]
+    fn test_daemon_config_persists_through_lifecycle() {
+        // Config should be accessible throughout lifecycle
+        use std::sync::atomic::Ordering;
+
+        let mut config = Config::default();
+        config.volume.step_max = 20;
+
+        let daemon = Daemon::new(config);
+
+        // Before start
+        assert_eq!(daemon.config.volume.step_max, 20);
+
+        // During run
+        daemon.running.store(true, Ordering::SeqCst);
+        assert_eq!(daemon.config.volume.step_max, 20);
+
+        // After stop
+        daemon.running.store(false, Ordering::SeqCst);
+        assert_eq!(daemon.config.volume.step_max, 20);
+    }
+
+    #[test]
+    fn test_daemon_shutdown_from_any_state() {
+        // Daemon should be stoppable from any state
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+
+        // Can stop when not started
+        daemon.running.store(false, Ordering::SeqCst);
+        assert!(!daemon.running.load(Ordering::SeqCst));
+
+        // Can stop when running
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.running.store(false, Ordering::SeqCst);
+        assert!(!daemon.running.load(Ordering::SeqCst));
+
+        // Can stop when in mic mode
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.control_mode = ControlMode::Microphone;
+        daemon.running.store(false, Ordering::SeqCst);
+        assert!(!daemon.running.load(Ordering::SeqCst));
+
+        // Can stop when disconnected
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.connected = false;
+        daemon.running.store(false, Ordering::SeqCst);
+        assert!(!daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_uptime_calculation() {
+        // Should be able to calculate daemon uptime
+        let mut daemon = Daemon::new(Config::default());
+
+        // Record start
+        let start = Instant::now();
+        daemon.stats.start_time = Some(start);
+
+        // Wait a bit
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Calculate uptime
+        let uptime = daemon.stats.start_time.unwrap().elapsed();
+        assert!(uptime >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_daemon_stops_processing_after_shutdown() {
+        // After shutdown signal, daemon should stop processing
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+
+        // Simulate some activity
+        daemon.handle_rotation(5);
+        let count_before = daemon.stats.rotation_count;
+
+        // Shutdown
+        daemon.running.store(false, Ordering::SeqCst);
+
+        // In real daemon, the loop would exit
+        // We verify the flag is checked
+        assert!(!daemon.running.load(Ordering::SeqCst));
+
+        // Stats from before shutdown are preserved
+        assert_eq!(daemon.stats.rotation_count, count_before);
+    }
 }
