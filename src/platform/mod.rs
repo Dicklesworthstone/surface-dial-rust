@@ -17,6 +17,9 @@ mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// Mock platform for testing (always available for integration tests)
+pub mod mock;
+
 // Re-export the current platform's implementation
 #[cfg(target_os = "macos")]
 pub use macos::MacOS as CurrentPlatform;

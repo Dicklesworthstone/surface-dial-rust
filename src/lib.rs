@@ -10,10 +10,12 @@
 //! - [`logging`] - Structured logging with file rotation and color support
 //! - [`input`] - Click detection and rotation sensitivity processing
 //! - [`daemon`] - Main daemon loop implementation
+//! - [`hid`] - HID device abstraction for testing
 
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod hid;
 pub mod input;
 pub mod logging;
 pub mod platform;
