@@ -97,10 +97,12 @@ get_binary_name() {
 # =============================================================================
 
 print_header() {
+    local platform
+    platform="$(detect_platform)"
     echo
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}  ${BOLD}Surface Dial Volume Controller${NC}                              ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  Version: ${VERSION}  •  Platform: $(detect_platform)                   ${CYAN}║${NC}"
+    printf "${CYAN}║${NC}  Version: %-6s  •  Platform: %-16s          ${CYAN}║${NC}\n" "${VERSION}" "${platform}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo
 }
@@ -394,7 +396,17 @@ install_linux() {
     # Check HID permissions
     echo
     echo "Checking HID device permissions..."
-    if ! ls /dev/hidraw* 2>/dev/null | head -1 | xargs -I{} test -r {} 2>/dev/null; then
+    local hidraw_readable=false
+    if ls /dev/hidraw* &>/dev/null; then
+        # hidraw devices exist, check if any are readable
+        for dev in /dev/hidraw*; do
+            if [[ -r "$dev" ]]; then
+                hidraw_readable=true
+                break
+            fi
+        done
+    fi
+    if [[ "$hidraw_readable" == "false" ]]; then
         echo
         echo "┌─────────────────────────────────────────────────────────────┐"
         echo "│  HID permissions may need configuration                     │"
