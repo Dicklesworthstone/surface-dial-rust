@@ -1,0 +1,32 @@
+[package]
+name = "surface-dial"
+version = "0.1.0"
+edition = "2021"
+description = "Surface Dial volume controller daemon for macOS"
+authors = ["jemanuel"]
+default-run = "surface-dial"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.11"
+ctrlc = "3.4"
+hidapi = "2.6"
+
+# CLI framework
+clap = { version = "4", features = ["derive", "env", "color"] }
+
+# Config system
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+dirs = "5.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.10"
+
+# CGEventTap dependencies - only needed for debug binaries that demo the old approach
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"

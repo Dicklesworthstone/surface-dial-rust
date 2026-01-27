@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Generated documentation
+*.html
+
+# macOS
+.DS_Store
