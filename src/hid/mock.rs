@@ -216,6 +216,11 @@ impl HidDevice for MockHidDevice {
             return Err(HidError::Disconnected);
         }
 
+        // Buffer must be at least 3 bytes for the battery report
+        if buf.len() < 3 {
+            return Err(HidError::Io("Buffer too small for feature report".to_string()));
+        }
+
         // Return battery level in feature report format
         // Format: [report_id, battery_level, charging_status]
         buf[0] = 0x05; // Battery report ID
@@ -314,6 +319,16 @@ mod tests {
         assert_eq!(len, 3);
         assert_eq!(buf[0], 0x05); // Battery report ID
         assert_eq!(buf[1], 25);   // Battery level
+    }
+
+    #[test]
+    fn test_feature_report_buffer_too_small() {
+        let device = MockHidDevice::new();
+
+        // Buffer smaller than required 3 bytes should fail
+        let mut small_buf = [0u8; 2];
+        let result = device.get_feature_report(&mut small_buf);
+        assert!(matches!(result, Err(HidError::Io(_))));
     }
 
     #[test]

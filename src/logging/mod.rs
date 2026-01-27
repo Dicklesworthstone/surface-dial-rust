@@ -98,16 +98,13 @@ impl RotatingFile {
         // Close current file
         self.writer.flush()?;
 
-        // Rotate existing files (oldest gets deleted)
+        // Rotate existing files: .1 -> .2, .2 -> .3, etc.
+        // Loop in reverse so we don't overwrite files we haven't moved yet
         for i in (1..self.keep_files).rev() {
             let old_path = self.rotated_path(i);
             let new_path = self.rotated_path(i + 1);
             if old_path.exists() {
-                if i + 1 > self.keep_files {
-                    std::fs::remove_file(&old_path)?;
-                } else {
-                    std::fs::rename(&old_path, &new_path)?;
-                }
+                std::fs::rename(&old_path, &new_path)?;
             }
         }
 

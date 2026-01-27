@@ -561,7 +561,7 @@ impl Config {
             ));
         }
 
-        let valid_media_actions = ["play_pause", "next_track"];
+        let valid_media_actions = ["play_pause", "next_track", "prev_track"];
         if !valid_media_actions.contains(&self.media_control.triple_click_action.as_str()) {
             errors.push(format!(
                 "media_control.triple_click_action '{}' must be one of: {}",

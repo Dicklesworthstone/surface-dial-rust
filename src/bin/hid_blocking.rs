@@ -3,7 +3,6 @@
 //! The dial might need blocking reads instead of polling
 
 use hidapi::HidApi;
-use std::time::Duration;
 
 const VENDOR_ID: u16 = 0x045E;
 const PRODUCT_ID: u16 = 0x091B;
