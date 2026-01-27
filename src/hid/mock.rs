@@ -159,34 +159,45 @@ impl MockHidDevice {
 
 impl HidDevice for MockHidDevice {
     fn read_timeout(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, HidError> {
-        let mut state = self.state.lock().unwrap();
+        // Check state with lock held briefly, only pop event if connected
+        let result = {
+            let mut state = self.state.lock().unwrap();
 
-        if !state.connected {
-            return Err(HidError::Disconnected);
-        }
-
-        if let Some(event) = state.events.pop_front() {
-            let report = match event {
-                MockHidEvent::Rotation(dir) => DialReport::new(false, dir),
-                MockHidEvent::Button(pressed) => DialReport::new(pressed, 0),
-                MockHidEvent::RawReport(data) => {
-                    let len = data.len().min(buf.len());
-                    buf[..len].copy_from_slice(&data[..len]);
-                    return Ok(len);
-                }
-            };
-
-            let bytes = report.to_bytes();
-            let len = bytes.len().min(buf.len());
-            buf[..len].copy_from_slice(&bytes[..len]);
-            Ok(len)
-        } else {
-            // No event - simulate timeout
-            // In tests, we don't actually sleep for the full timeout
-            if timeout > Duration::ZERO && !state.blocking {
-                std::thread::sleep(Duration::from_millis(1));
+            if !state.connected {
+                Err(HidError::Disconnected)
+            } else if let Some(event) = state.events.pop_front() {
+                Ok(Some(event))
+            } else if timeout > Duration::ZERO && !state.blocking {
+                Ok(None) // Will sleep after releasing lock
+            } else {
+                Err(HidError::Timeout)
             }
-            Err(HidError::Timeout)
+        };
+        // Lock is now released
+
+        match result {
+            Err(e) => Err(e),
+            Ok(None) => {
+                // Sleep without holding the lock
+                std::thread::sleep(Duration::from_millis(1));
+                Err(HidError::Timeout)
+            }
+            Ok(Some(event)) => {
+                let report = match event {
+                    MockHidEvent::Rotation(dir) => DialReport::new(false, dir),
+                    MockHidEvent::Button(pressed) => DialReport::new(pressed, 0),
+                    MockHidEvent::RawReport(data) => {
+                        let len = data.len().min(buf.len());
+                        buf[..len].copy_from_slice(&data[..len]);
+                        return Ok(len);
+                    }
+                };
+
+                let bytes = report.to_bytes();
+                let len = bytes.len().min(buf.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                Ok(len)
+            }
         }
     }
 
