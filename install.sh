@@ -1,8 +1,54 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Surface Dial Volume Controller Installer
+#
+# One-line install:
+#   curl -fsSL https://raw.githubusercontent.com/USER/surface-dial/main/install.sh | bash
+#
+# Options:
+#   DEST=/path        Install directory (default: ~/.local/bin)
+#   NO_AUTOSTART=1    Skip auto-start setup
+#   VERSION=x.y.z     Install specific version (default: build from source)
+#
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Determine script directory (empty if piped from curl)
+if [[ -n "${BASH_SOURCE[0]:-}" ]] && [[ -f "${BASH_SOURCE[0]}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    SCRIPT_DIR=""
+fi
+
 VERSION="1.0.0"
+REPO="USER/surface-dial"
+
+# =============================================================================
+# Colors and Logging (DIAL-l4i giil-style)
+# =============================================================================
+
+# Check if we're in a terminal that supports colors
+if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    CYAN=''
+    BOLD=''
+    NC=''
+fi
+
+log_info()  { echo -e "${GREEN}[installer]${NC} $1"; }
+log_warn()  { echo -e "${YELLOW}[installer]${NC} $1"; }
+log_error() { echo -e "${RED}[installer]${NC} $1"; }
+log_step()  { echo -e "${BLUE}==>${NC} ${BOLD}$1${NC}"; }
 
 # =============================================================================
 # Platform Detection Module (DIAL-y5b)
@@ -51,29 +97,41 @@ get_binary_name() {
 # =============================================================================
 
 print_header() {
-    echo "=== Surface Dial Volume Controller Installer ==="
-    echo "Version: ${VERSION}"
-    echo "Platform: $(detect_platform)"
+    echo
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}  ${BOLD}Surface Dial Volume Controller${NC}                              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  Version: ${VERSION}  •  Platform: $(detect_platform)                   ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo
 }
 
 print_usage() {
     cat << EOF
-Usage: $0 [OPTIONS]
+${BOLD}Surface Dial Volume Controller Installer${NC}
 
-Options:
+${BOLD}Quick Install:${NC}
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash
+
+${BOLD}Usage:${NC} $0 [OPTIONS]
+
+${BOLD}Options:${NC}
   --detect-only     Print detected platform and exit
   --from-release    Download pre-built binary from GitHub releases
   --build-local     Build from source (requires Rust toolchain)
   --uninstall       Remove Surface Dial and its service
   --help            Show this help message
 
-Examples:
-  $0                     # Auto-detect: build local if cargo available, else download
-  $0 --detect-only       # Just print platform detection result
+${BOLD}Environment Variables:${NC}
+  DEST=/path        Install directory (default: ~/.local/bin)
+  NO_AUTOSTART=1    Skip auto-start service setup
+  VERSION=x.y.z     Install specific version
+
+${BOLD}Examples:${NC}
+  $0                     # Auto-detect: build if cargo available
   $0 --from-release      # Download pre-built binary
   $0 --build-local       # Build from source
   $0 --uninstall         # Remove installation
+  DEST=/opt $0           # Install to /opt
 EOF
 }
 
@@ -86,10 +144,15 @@ check_rust_toolchain() {
 }
 
 build_from_source() {
-    echo "Building release binary..."
+    log_step "Building release binary..."
+    if [[ -z "$SCRIPT_DIR" ]]; then
+        log_error "Cannot build from source when running via curl."
+        log_info "Clone the repo first: git clone https://github.com/${REPO}"
+        exit 1
+    fi
     cd "$SCRIPT_DIR"
     cargo build --release
-    echo "Build complete."
+    log_info "Build complete."
 }
 
 # =============================================================================
@@ -248,35 +311,288 @@ uninstall_macos() {
 }
 
 # =============================================================================
-# Linux Installation (stub - implemented in DIAL-ufq)
+# Linux Installation (DIAL-ufq)
 # =============================================================================
 
+generate_systemd_service() {
+    local binary_path="$1"
+    local config_dir="$2"
+    local log_dir="$3"
+    cat << EOF
+[Unit]
+Description=Surface Dial Volume Controller
+Documentation=https://github.com/USER/surface-dial
+After=default.target bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=${binary_path} daemon
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=${config_dir} ${log_dir}
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+generate_udev_rule() {
+    cat << 'EOF'
+# Surface Dial HID access for non-root users
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="091b", MODE="0666", GROUP="plugdev"
+EOF
+}
+
 install_linux() {
-    echo "Linux installation..."
+    local install_dir="${HOME}/.local/bin"
+    local service_dir="${HOME}/.config/systemd/user"
+    local service_file="${service_dir}/surface-dial.service"
+    local config_dir="${HOME}/.config/surface-dial"
+    local log_dir="${HOME}/.local/share/surface-dial"
+    local binary_path="${install_dir}/surface-dial"
+
+    echo "Installing for Linux..."
     echo
-    echo "Error: Linux installer not yet implemented."
-    echo "See issue DIAL-ufq: Linux installer with systemd user service"
+
+    # Build or download binary
+    if [[ "${INSTALL_MODE:-auto}" == "build" ]] || { [[ "${INSTALL_MODE:-auto}" == "auto" ]] && check_rust_toolchain; }; then
+        build_from_source
+        local src_binary="${SCRIPT_DIR}/target/release/surface-dial"
+    else
+        echo "Error: Pre-built release download not yet implemented."
+        echo "Please install Rust and run with --build-local"
+        exit 1
+    fi
+
+    # Stop existing service (if any)
+    echo "Stopping existing service (if any)..."
+    systemctl --user stop surface-dial.service 2>/dev/null || true
+    systemctl --user disable surface-dial.service 2>/dev/null || true
+
+    # Create directories
+    echo "Creating directories..."
+    mkdir -p "$install_dir" "$service_dir" "$config_dir" "$log_dir"
+
+    # Install binary
+    echo "Installing binary to: ${binary_path}"
+    cp "$src_binary" "$binary_path"
+    chmod +x "$binary_path"
+
+    # Generate and install systemd service
+    echo "Installing systemd user service..."
+    generate_systemd_service "$binary_path" "$config_dir" "$log_dir" > "$service_file"
+
+    # Reload systemd
+    systemctl --user daemon-reload
+
+    # Check HID permissions
     echo
-    echo "For now, build manually:"
-    echo "  cargo build --release"
-    echo "  sudo cp target/release/surface-dial /usr/local/bin/"
-    exit 1
+    echo "Checking HID device permissions..."
+    if ! ls /dev/hidraw* 2>/dev/null | head -1 | xargs -I{} test -r {} 2>/dev/null; then
+        echo
+        echo "┌─────────────────────────────────────────────────────────────┐"
+        echo "│  HID permissions may need configuration                     │"
+        echo "└─────────────────────────────────────────────────────────────┘"
+        echo
+        echo "Option 1: Add udev rule (recommended, requires sudo):"
+        echo "  sudo tee /etc/udev/rules.d/99-surface-dial.rules << 'RULE'"
+        generate_udev_rule
+        echo "RULE"
+        echo "  sudo udevadm control --reload-rules"
+        echo "  sudo udevadm trigger"
+        echo
+        echo "Option 2: Add user to input group:"
+        echo "  sudo usermod -aG input \$USER"
+        echo "  # Log out and back in"
+        echo
+    fi
+
+    # Enable and start service
+    echo "Enabling and starting service..."
+    systemctl --user enable surface-dial.service
+    systemctl --user start surface-dial.service
+
+    # Verify it started
+    sleep 1
+    if systemctl --user is-active --quiet surface-dial.service; then
+        echo
+        echo "=== Installation Complete ==="
+        echo
+        echo "The Surface Dial volume controller is now running."
+        echo
+        echo "Binary:   ${binary_path}"
+        echo "Service:  ${service_file}"
+        echo "Config:   ${config_dir}/config.toml"
+        echo "Logs:     journalctl --user -u surface-dial -f"
+        echo
+        echo "Commands:"
+        echo "  Status:     systemctl --user status surface-dial"
+        echo "  Logs:       journalctl --user -u surface-dial -f"
+        echo "  Stop:       systemctl --user stop surface-dial"
+        echo "  Start:      systemctl --user start surface-dial"
+        echo "  Uninstall:  $0 --uninstall"
+        echo
+        echo "Note: For auto-start without login, run:"
+        echo "  loginctl enable-linger \$USER"
+    else
+        echo
+        echo "Warning: Service may not have started."
+        echo "Check status: systemctl --user status surface-dial"
+        echo "Check logs:   journalctl --user -u surface-dial"
+    fi
+}
+
+uninstall_linux() {
+    local service_file="${HOME}/.config/systemd/user/surface-dial.service"
+    local binary_path="${HOME}/.local/bin/surface-dial"
+
+    echo "Uninstalling Surface Dial..."
+
+    # Stop and disable service
+    systemctl --user stop surface-dial.service 2>/dev/null || true
+    systemctl --user disable surface-dial.service 2>/dev/null || true
+    rm -f "$service_file"
+    systemctl --user daemon-reload
+
+    # Remove binary
+    rm -f "$binary_path"
+
+    echo
+    echo "=== Uninstall Complete ==="
+    echo
+    echo "Removed:"
+    echo "  - Service: ${service_file}"
+    echo "  - Binary: ${binary_path}"
+    echo
+    echo "Preserved (user data):"
+    echo "  - Config: ~/.config/surface-dial/"
+    echo "  - Logs are in journald"
+    echo
+    echo "To remove udev rule (if installed):"
+    echo "  sudo rm /etc/udev/rules.d/99-surface-dial.rules"
 }
 
 # =============================================================================
-# Windows Installation (stub - implemented in DIAL-wic)
+# Windows Installation (DIAL-wic)
 # =============================================================================
 
 install_windows() {
-    echo "Windows installation..."
+    local install_dir="${LOCALAPPDATA:-$HOME/AppData/Local}/surface-dial"
+    local binary_path="${install_dir}/surface-dial.exe"
+    local task_name="SurfaceDialController"
+
+    echo "Installing for Windows..."
     echo
-    echo "Error: Windows installer not yet implemented."
-    echo "See issue DIAL-wic: Windows installer with Task Scheduler auto-start"
+
+    # Check if running in proper environment
+    if ! command -v powershell.exe &>/dev/null && ! command -v powershell &>/dev/null; then
+        echo "Error: PowerShell not found."
+        echo "Please run from PowerShell or Git Bash on Windows."
+        exit 1
+    fi
+
+    # Build or download binary
+    if [[ "${INSTALL_MODE:-auto}" == "build" ]] || { [[ "${INSTALL_MODE:-auto}" == "auto" ]] && check_rust_toolchain; }; then
+        build_from_source
+        local src_binary="${SCRIPT_DIR}/target/release/surface-dial.exe"
+        if [[ ! -f "$src_binary" ]]; then
+            src_binary="${SCRIPT_DIR}/target/release/surface-dial"
+        fi
+    else
+        echo "Error: Pre-built release download not yet implemented."
+        echo "Please install Rust and run with --build-local"
+        exit 1
+    fi
+
+    # Create directory and copy binary
+    echo "Installing binary to: ${install_dir}"
+    mkdir -p "$install_dir"
+    cp "$src_binary" "$binary_path"
+
+    # Create Task Scheduler entry using PowerShell
+    echo "Setting up auto-start via Task Scheduler..."
+    local ps_script='
+        $taskName = "SurfaceDialController"
+        $exePath = "'"$binary_path"'"
+
+        # Remove existing task if present
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+        # Create new task
+        $action = New-ScheduledTaskAction -Execute $exePath -Argument "daemon"
+        $trigger = New-ScheduledTaskTrigger -AtLogon
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings | Out-Null
+
+        # Start immediately
+        Start-ScheduledTask -TaskName $taskName
+
+        Write-Host "Task Scheduler entry created: $taskName"
+    '
+
+    if command -v powershell.exe &>/dev/null; then
+        powershell.exe -NoProfile -Command "$ps_script"
+    else
+        powershell -NoProfile -Command "$ps_script"
+    fi
+
     echo
-    echo "For now, build manually:"
-    echo "  cargo build --release"
-    echo "  # Copy target/release/surface-dial.exe to desired location"
-    exit 1
+    echo "=== Installation Complete ==="
+    echo
+    echo "The Surface Dial volume controller is now running."
+    echo
+    echo "Binary:     ${binary_path}"
+    echo "Auto-start: Task Scheduler (${task_name})"
+    echo "Config:     %APPDATA%\\surface-dial\\config.toml"
+    echo
+    echo "Commands (PowerShell):"
+    echo "  Status:     Get-ScheduledTask -TaskName ${task_name}"
+    echo "  Stop:       Stop-ScheduledTask -TaskName ${task_name}"
+    echo "  Start:      Start-ScheduledTask -TaskName ${task_name}"
+    echo "  Uninstall:  $0 --uninstall"
+}
+
+uninstall_windows() {
+    local install_dir="${LOCALAPPDATA:-$HOME/AppData/Local}/surface-dial"
+    local binary_path="${install_dir}/surface-dial.exe"
+    local task_name="SurfaceDialController"
+
+    echo "Uninstalling Surface Dial..."
+
+    # Remove Task Scheduler entry
+    local ps_script='
+        $taskName = "SurfaceDialController"
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Host "Task Scheduler entry removed"
+    '
+
+    if command -v powershell.exe &>/dev/null; then
+        powershell.exe -NoProfile -Command "$ps_script"
+    elif command -v powershell &>/dev/null; then
+        powershell -NoProfile -Command "$ps_script"
+    fi
+
+    # Remove binary
+    rm -f "$binary_path"
+    rmdir "$install_dir" 2>/dev/null || true
+
+    echo
+    echo "=== Uninstall Complete ==="
+    echo
+    echo "Removed:"
+    echo "  - Task: ${task_name}"
+    echo "  - Binary: ${binary_path}"
+    echo
+    echo "Preserved (user data):"
+    echo "  - Config: %APPDATA%\\surface-dial\\"
 }
 
 # =============================================================================
@@ -340,17 +656,17 @@ main() {
             ;;
         linux)
             if [[ "$ACTION" == "uninstall" ]]; then
-                echo "Error: Linux uninstaller not yet implemented."
-                exit 1
+                uninstall_linux
+            else
+                install_linux
             fi
-            install_linux
             ;;
         windows)
             if [[ "$ACTION" == "uninstall" ]]; then
-                echo "Error: Windows uninstaller not yet implemented."
-                exit 1
+                uninstall_windows
+            else
+                install_windows
             fi
-            install_windows
             ;;
         *)
             echo "Error: Unsupported platform: $(detect_platform)"
