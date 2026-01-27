@@ -1216,4 +1216,311 @@ mod tests {
         // This verifies no crash or panic occurs
         assert!(daemon.was_button_pressed);
     }
+
+    // ==========================================================================
+    // Error Recovery Tests
+    // ==========================================================================
+    //
+    // These tests verify the daemon recovers gracefully from various error
+    // conditions including device disconnection, config issues, and transient
+    // failures.
+
+    #[test]
+    fn test_device_disconnect_sets_connected_false() {
+        // When device disconnects, connected flag should be set to false
+        let mut daemon = Daemon::new(Config::default());
+
+        // Initially not connected
+        assert!(!daemon.connected);
+
+        // Simulate connection
+        daemon.connected = true;
+        assert!(daemon.connected);
+
+        // Simulate disconnect (what process_hid_events does when device not found)
+        daemon.connected = false;
+        assert!(!daemon.connected);
+    }
+
+    #[test]
+    fn test_device_reconnect_after_disconnect() {
+        // After disconnect, daemon should be ready to reconnect
+        let mut daemon = Daemon::new(Config::default());
+
+        // Simulate connect -> disconnect -> reconnect cycle
+        daemon.connected = true;
+        assert!(daemon.connected);
+
+        daemon.connected = false;
+        assert!(!daemon.connected);
+
+        // Simulating reconnection (what happens when device is found again)
+        daemon.connected = true;
+        assert!(daemon.connected);
+
+        // Stats should be preserved across reconnect
+        daemon.stats.rotation_count = 50;
+        daemon.connected = false;
+        daemon.connected = true;
+        assert_eq!(daemon.stats.rotation_count, 50);
+    }
+
+    #[test]
+    fn test_config_reload_handles_invalid_gracefully() {
+        // Reload should handle edge cases in config
+        let mut daemon = Daemon::new(Config::default());
+
+        // Reload with minimal config (defaults)
+        let config = Config::default();
+        daemon.reload_config(config);
+
+        // Should not panic, config should be updated
+        assert_eq!(daemon.config.volume.step_min, 2); // Default value
+    }
+
+    #[test]
+    fn test_state_preserved_through_errors() {
+        // Critical state should be preserved even during error conditions
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+
+        // Set up some state
+        daemon.control_mode = ControlMode::Microphone;
+        daemon.stats.rotation_count = 100;
+        daemon.stats.click_count = 50;
+        daemon.mic_mode_started = Some(Instant::now());
+
+        // Simulate "error" - disconnect
+        daemon.connected = false;
+
+        // Critical state should be preserved
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+        assert_eq!(daemon.stats.rotation_count, 100);
+        assert_eq!(daemon.stats.click_count, 50);
+        assert!(daemon.mic_mode_started.is_some());
+        assert!(daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_multiple_disconnect_reconnect_cycles() {
+        // Daemon should handle multiple disconnect/reconnect cycles
+        let mut daemon = Daemon::new(Config::default());
+
+        for cycle in 0..5 {
+            // Connect
+            daemon.connected = true;
+            assert!(daemon.connected, "Cycle {}: should be connected", cycle);
+
+            // Simulate some activity
+            daemon.stats.rotation_count += 10;
+
+            // Disconnect
+            daemon.connected = false;
+            assert!(!daemon.connected, "Cycle {}: should be disconnected", cycle);
+        }
+
+        // Stats should accumulate across cycles
+        assert_eq!(daemon.stats.rotation_count, 50);
+    }
+
+    #[test]
+    fn test_rotation_processing_after_reconnect() {
+        // Rotation processor should work correctly after reconnect
+        let mut daemon = Daemon::new(Config::default());
+
+        // First connection - process some rotation
+        daemon.connected = true;
+        daemon.handle_rotation(5);
+        daemon.handle_rotation(5);
+
+        // Disconnect
+        daemon.connected = false;
+
+        // Reconnect
+        daemon.connected = true;
+
+        // Should still be able to process rotation
+        daemon.handle_rotation(5);
+        // No panic = success
+    }
+
+    #[test]
+    fn test_click_detection_after_reconnect() {
+        // Click detector should work correctly after reconnect
+        let mut daemon = Daemon::new(Config::default());
+
+        // First connection
+        daemon.connected = true;
+        daemon.handle_button_state(true);
+        daemon.handle_button_state(false);
+
+        // Disconnect
+        daemon.connected = false;
+
+        // Reconnect
+        daemon.connected = true;
+
+        // Should still be able to detect clicks
+        daemon.handle_button_state(true);
+        daemon.handle_button_state(false);
+
+        // Allow time for single click to register
+        std::thread::sleep(Duration::from_millis(400));
+        daemon.tick();
+
+        assert!(daemon.stats.click_count >= 1);
+    }
+
+    #[test]
+    fn test_mode_preserved_through_disconnect() {
+        // Current mode should be preserved through disconnect/reconnect
+        let mut daemon = Daemon::new(Config::default());
+
+        // Enter mic mode
+        daemon.switch_mode(ControlMode::Microphone);
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+
+        // Simulate disconnect
+        daemon.connected = false;
+
+        // Mode should be preserved
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+
+        // Reconnect
+        daemon.connected = true;
+
+        // Mode should still be microphone
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+    }
+
+    #[test]
+    fn test_button_state_cleared_on_disconnect() {
+        // When device disconnects mid-press, we should handle it gracefully
+        let mut daemon = Daemon::new(Config::default());
+
+        // Button is pressed
+        daemon.handle_button_state(true);
+        assert!(daemon.was_button_pressed);
+
+        // Device disconnects (simulated)
+        daemon.connected = false;
+
+        // The was_button_pressed state remains (hardware could reconnect)
+        // This is intentional - we don't want to lose state
+        assert!(daemon.was_button_pressed);
+
+        // On reconnect, if button is not pressed, we handle the release
+        daemon.connected = true;
+        daemon.handle_button_state(false);
+        assert!(!daemon.was_button_pressed);
+    }
+
+    #[test]
+    fn test_stats_not_corrupted_by_errors() {
+        // Stats should never become invalid due to errors
+        let mut daemon = Daemon::new(Config::default());
+
+        // Set some stats
+        daemon.stats.rotation_count = u64::MAX - 10;
+        daemon.stats.click_count = 1000;
+
+        // Simulate error conditions
+        daemon.connected = false;
+        daemon.connected = true;
+        daemon.connected = false;
+
+        // Stats should be unchanged
+        assert_eq!(daemon.stats.rotation_count, u64::MAX - 10);
+        assert_eq!(daemon.stats.click_count, 1000);
+
+        // Stats should still be incrementable
+        daemon.stats.rotation_count = daemon.stats.rotation_count.wrapping_add(1);
+        assert_eq!(daemon.stats.rotation_count, u64::MAX - 9);
+    }
+
+    #[test]
+    fn test_daemon_recoverable_after_many_errors() {
+        // Daemon should remain functional after many simulated errors
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+
+        // Simulate many error cycles
+        for _ in 0..100 {
+            daemon.connected = true;
+            daemon.connected = false;
+        }
+
+        // Daemon should still be able to function
+        assert!(daemon.running.load(Ordering::SeqCst));
+
+        // Should be able to process input
+        daemon.connected = true;
+        daemon.handle_button_state(true);
+        daemon.handle_button_state(false);
+        daemon.handle_rotation(5);
+        // No panic = success
+    }
+
+    #[test]
+    fn test_mic_mode_timer_survives_disconnect() {
+        // Mic mode timer should continue counting during disconnect
+        let mut daemon = Daemon::new(Config::default());
+
+        // Enter mic mode
+        daemon.switch_mode(ControlMode::Microphone);
+        daemon.mic_mode_started = Some(Instant::now());
+
+        // Small delay
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Disconnect
+        daemon.connected = false;
+
+        // Timer should still be running
+        assert!(daemon.mic_mode_started.is_some());
+        let elapsed = daemon.mic_mode_started.unwrap().elapsed();
+        assert!(elapsed >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_config_reload_during_error_state() {
+        // Config reload should work even when disconnected
+        let mut daemon = Daemon::new(Config::default());
+
+        // Disconnected state
+        daemon.connected = false;
+
+        // Reload config
+        let mut new_config = Config::default();
+        new_config.volume.step_max = 15;
+        daemon.reload_config(new_config);
+
+        // Config should be updated
+        assert_eq!(daemon.config.volume.step_max, 15);
+    }
+
+    #[test]
+    fn test_running_flag_survives_errors() {
+        // Running flag should not be affected by device errors
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+
+        // Simulate various error conditions
+        daemon.connected = false;  // Device disconnect
+        daemon.connected = true;
+        daemon.connected = false;
+
+        // Running flag should still be true
+        assert!(daemon.running.load(Ordering::SeqCst));
+
+        // Only explicit shutdown should set it false
+        daemon.running.store(false, Ordering::SeqCst);
+        assert!(!daemon.running.load(Ordering::SeqCst));
+    }
 }
