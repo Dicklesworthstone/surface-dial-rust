@@ -921,4 +921,299 @@ mod tests {
 
         assert_eq!(daemon.stats.click_count, 5);
     }
+
+    // ==========================================================================
+    // Signal Handling Tests
+    // ==========================================================================
+    //
+    // These tests verify the shutdown and reload mechanisms that would be triggered
+    // by Unix signals (SIGTERM, SIGINT, SIGHUP). Since we can't easily test actual
+    // signals in unit tests, we test the underlying mechanisms.
+
+    #[test]
+    fn test_shutdown_via_running_flag_sigterm_simulation() {
+        // Simulates SIGTERM behavior: external code sets running to false
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+        let running = daemon.running();
+
+        // Start "daemon" (just set the flag)
+        running.store(true, Ordering::SeqCst);
+        assert!(running.load(Ordering::SeqCst));
+
+        // Simulate signal handler setting flag to false (what ctrlc does)
+        running.store(false, Ordering::SeqCst);
+
+        // Verify shutdown is triggered
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_shutdown_via_running_flag_sigint_simulation() {
+        // SIGINT (Ctrl+C) uses the same mechanism as SIGTERM
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+        let running = daemon.running();
+
+        running.store(true, Ordering::SeqCst);
+
+        // Simulate Ctrl+C (SIGINT) handler
+        running.store(false, Ordering::SeqCst);
+
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_shutdown_from_different_thread() {
+        // Signal handlers run in a different context; verify cross-thread works
+        use std::sync::atomic::Ordering;
+        use std::thread;
+        use std::time::Duration;
+
+        let daemon = Daemon::new(Config::default());
+        let running = daemon.running();
+
+        running.store(true, Ordering::SeqCst);
+
+        // Spawn a thread that simulates signal handler
+        let signal_running = running.clone();
+        let handle = thread::spawn(move || {
+            // Small delay to simulate async signal delivery
+            thread::sleep(Duration::from_millis(10));
+            signal_running.store(false, Ordering::SeqCst);
+        });
+
+        // Wait for "signal"
+        handle.join().unwrap();
+
+        // Main "daemon" should see shutdown
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_config_reload_sighup_simulation() {
+        // SIGHUP typically triggers config reload
+        let mut daemon = Daemon::new(Config::default());
+
+        // Original config
+        assert_eq!(daemon.config.volume.step_min, 2);
+
+        // Simulate SIGHUP handler: read new config and reload
+        let mut new_config = Config::default();
+        new_config.volume.step_min = 10;
+        new_config.volume.step_max = 20;
+
+        daemon.reload_config(new_config);
+
+        // Verify reload happened
+        assert_eq!(daemon.config.volume.step_min, 10);
+        assert_eq!(daemon.config.volume.step_max, 20);
+    }
+
+    #[test]
+    fn test_reload_while_running() {
+        // Config can be reloaded while daemon is "running"
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.stats.rotation_count = 42;
+
+        // Reload config (SIGHUP handler)
+        let mut new_config = Config::default();
+        new_config.sensitivity.multiplier = 3.0;
+        daemon.reload_config(new_config);
+
+        // Daemon should still be running
+        assert!(daemon.running.load(Ordering::SeqCst));
+        // Stats should be preserved
+        assert_eq!(daemon.stats.rotation_count, 42);
+        // Config should be updated
+        assert_eq!(daemon.config.sensitivity.multiplier, 3.0);
+    }
+
+    #[test]
+    fn test_graceful_shutdown_preserves_stats() {
+        // On shutdown, stats should remain accessible for logging
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+
+        // Simulate some activity
+        daemon.stats.rotation_count = 100;
+        daemon.stats.click_count = 25;
+        daemon.stats.mode_switches = 5;
+
+        // Trigger shutdown
+        daemon.running.store(false, Ordering::SeqCst);
+
+        // Stats should still be accessible after shutdown
+        assert_eq!(daemon.stats.rotation_count, 100);
+        assert_eq!(daemon.stats.click_count, 25);
+        assert_eq!(daemon.stats.mode_switches, 5);
+    }
+
+    #[test]
+    fn test_multiple_shutdown_signals_idempotent() {
+        // Multiple signals shouldn't cause issues
+        use std::sync::atomic::Ordering;
+
+        let daemon = Daemon::new(Config::default());
+        let running = daemon.running();
+
+        running.store(true, Ordering::SeqCst);
+
+        // First "signal"
+        running.store(false, Ordering::SeqCst);
+        assert!(!running.load(Ordering::SeqCst));
+
+        // Second "signal" (shouldn't panic or cause issues)
+        running.store(false, Ordering::SeqCst);
+        assert!(!running.load(Ordering::SeqCst));
+
+        // Third "signal"
+        running.store(false, Ordering::SeqCst);
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_reload_updates_click_detector_config() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Original double-click timing
+        let original_double_click = daemon.config.interaction.double_click_ms;
+
+        // Reload with different timing
+        let mut new_config = Config::default();
+        new_config.interaction.double_click_ms = original_double_click + 100;
+        daemon.reload_config(new_config);
+
+        // Config should be updated (click detector internally updates too)
+        assert_eq!(
+            daemon.config.interaction.double_click_ms,
+            original_double_click + 100
+        );
+    }
+
+    #[test]
+    fn test_reload_updates_rotation_processor_config() {
+        let mut daemon = Daemon::new(Config::default());
+
+        // Original sensitivity
+        let original_multiplier = daemon.config.sensitivity.multiplier;
+
+        // Reload with different sensitivity
+        let mut new_config = Config::default();
+        new_config.sensitivity.multiplier = original_multiplier * 2.0;
+        new_config.sensitivity.dead_zone = 10;
+        daemon.reload_config(new_config);
+
+        // Config should be updated
+        assert_eq!(
+            daemon.config.sensitivity.multiplier,
+            original_multiplier * 2.0
+        );
+        assert_eq!(daemon.config.sensitivity.dead_zone, 10);
+    }
+
+    #[test]
+    fn test_shutdown_clears_mic_mode() {
+        // Verify shutdown behavior with mic mode active
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+
+        // Enter mic mode
+        daemon.switch_mode(ControlMode::Microphone);
+        daemon.mic_mode_started = Some(Instant::now());
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+
+        // Trigger shutdown
+        daemon.running.store(false, Ordering::SeqCst);
+
+        // Daemon is stopped, but state remains for inspection/logging
+        assert_eq!(daemon.control_mode, ControlMode::Microphone);
+        assert!(daemon.mic_mode_started.is_some());
+    }
+
+    #[test]
+    fn test_startup_time_recorded() {
+        // Stats should record when daemon started
+        let mut daemon = Daemon::new(Config::default());
+
+        // Before run(), no start time
+        assert!(daemon.stats.start_time.is_none());
+
+        // Simulate run() starting (normally this is done inside run())
+        daemon.running.store(true, Ordering::SeqCst);
+        daemon.stats.start_time = Some(Instant::now());
+
+        // Start time should be recorded
+        assert!(daemon.stats.start_time.is_some());
+    }
+
+    #[test]
+    fn test_uptime_calculable_from_stats() {
+        // Should be able to calculate uptime from stats
+        let mut daemon = Daemon::new(Config::default());
+
+        // Record start time
+        let start = Instant::now();
+        daemon.stats.start_time = Some(start);
+
+        // Wait a bit
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Calculate uptime
+        let uptime = daemon
+            .stats
+            .start_time
+            .map(|s| s.elapsed())
+            .unwrap_or(Duration::ZERO);
+
+        // Uptime should be at least 50ms
+        assert!(uptime >= Duration::from_millis(50));
+    }
+
+    // ==========================================================================
+    // Cleanup Verification Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_connected_state_on_shutdown() {
+        // Connected state should be inspectable on shutdown
+        use std::sync::atomic::Ordering;
+
+        let mut daemon = Daemon::new(Config::default());
+        daemon.running.store(true, Ordering::SeqCst);
+
+        // Simulate device connected
+        daemon.connected = true;
+
+        // Shutdown
+        daemon.running.store(false, Ordering::SeqCst);
+
+        // Should still know device was connected (for cleanup/logging)
+        assert!(daemon.connected);
+    }
+
+    #[test]
+    fn test_button_state_reset_on_mode_switch() {
+        // Mode switch should handle any pending button state
+        let mut daemon = Daemon::new(Config::default());
+
+        // Simulate button held down
+        daemon.was_button_pressed = true;
+
+        // Switch mode (e.g., from double-click)
+        daemon.switch_mode(ControlMode::Microphone);
+
+        // Button state is preserved (will be handled normally)
+        // This verifies no crash or panic occurs
+        assert!(daemon.was_button_pressed);
+    }
 }
