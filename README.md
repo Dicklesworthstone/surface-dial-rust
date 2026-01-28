@@ -1,24 +1,10 @@
+<div align="center">
+  <img src="dial_illustration.webp" alt="Surface Dial Volume Controller - Turn your Microsoft Surface Dial into a premium volume knob for any OS">
+</div>
+
 # Surface Dial Volume Controller
 
 <div align="center">
-
-```
-    ╭──────────────────────────────────────────────────────────────╮
-    │                                                              │
-    │       ┌─────────────────────────────────────────────┐        │
-    │       │                                             │        │
-    │       │              ┌───────────┐                  │        │
-    │       │              │           │                  │        │
-    │       │              │   ◉ ─→    │  Rotate: Volume  │        │
-    │       │              │           │  Click: Mute     │        │
-    │       │              └───────────┘  Double: Mic     │        │
-    │       │                             Triple: Media   │        │
-    │       │           Surface Dial                      │        │
-    │       │                                             │        │
-    │       └─────────────────────────────────────────────┘        │
-    │                                                              │
-    ╰──────────────────────────────────────────────────────────────╯
-```
 
 **Turn your Microsoft Surface Dial into a premium volume knob for any OS**
 
