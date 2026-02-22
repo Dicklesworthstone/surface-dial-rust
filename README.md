@@ -10,7 +10,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#platform-support)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](LICENSE)
 
 [Installation](#installation) · [Quick Start](#quick-start) · [Configuration](#configuration) · [Commands](#commands)
 
@@ -692,7 +692,7 @@ Please don't take this the wrong way, but I do not accept outside contributions 
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+MIT License (with OpenAI/Anthropic Rider) — see [LICENSE](LICENSE) for details.
 
 ---
 
