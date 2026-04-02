@@ -4,21 +4,37 @@
 //! - Button press: OtherMouseDown/Up with button 31
 //! - Rotation: KeyDown/Up with keycode 123 (left) or 124 (right)
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("event_tap requires macOS (CGEventTap). This binary is not supported on this platform.");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "macos")]
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
+#[cfg(target_os = "macos")]
 use core_graphics::event::{
     CGEventTap, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventType, EventField,
 };
+#[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
 const KEYCODE_LEFT_ARROW: i64 = 123;
+#[cfg(target_os = "macos")]
 const KEYCODE_RIGHT_ARROW: i64 = 124;
+#[cfg(target_os = "macos")]
 const VOLUME_STEP: i32 = 2;
 
+#[cfg(target_os = "macos")]
 static LAST_BUTTON_STATE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "macos")]
 fn get_volume() -> Option<i32> {
     let output = Command::new("osascript")
         .args(["-e", "output volume of (get volume settings)"])
@@ -27,6 +43,7 @@ fn get_volume() -> Option<i32> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+#[cfg(target_os = "macos")]
 fn set_volume(vol: i32) {
     let vol = vol.clamp(0, 100);
     let _ = Command::new("osascript")
@@ -35,6 +52,7 @@ fn set_volume(vol: i32) {
     println!("Volume: {}%", vol);
 }
 
+#[cfg(target_os = "macos")]
 fn toggle_mute() {
     let _ = Command::new("osascript")
         .args(["-e", "set volume output muted not (output muted of (get volume settings))"])
@@ -42,6 +60,7 @@ fn toggle_mute() {
     println!("Toggled mute");
 }
 
+#[cfg(target_os = "macos")]
 fn main() {
     println!("Surface Dial Volume Controller");
     println!("===============================");

@@ -1,14 +1,25 @@
 //! Debug tool to see ALL CGEvents coming through
 //! This will help identify what events (if any) the Surface Dial generates
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("debug_events requires macOS (CGEventTap). This binary is not supported on this platform.");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "macos")]
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
+#[cfg(target_os = "macos")]
 use core_graphics::event::{
     CGEventTap, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventType, EventField,
 };
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
 fn main() {
     println!("=== CGEvent Debug Tool ===");
     println!("Logging ALL events. Press Ctrl+C to exit.\n");
