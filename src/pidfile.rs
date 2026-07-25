@@ -521,10 +521,33 @@ mod tests {
 
     #[test]
     fn test_create_in_nonexistent_readonly_fails() {
-        // This test tries to create in a path that should fail
-        // /nonexistent is not writable by normal users
-        let result = PidFile::create("/nonexistent/path/that/should/fail/test.pid");
-        assert!(result.is_err());
+        use std::os::unix::fs::PermissionsExt;
+
+        // This previously used "/nonexistent/path/..." on the assumption that
+        // the filesystem root is not writable by normal users. That does not
+        // hold in every build sandbox — where `/` is writable, `create`
+        // successfully ran its `create_dir_all` and the assertion failed
+        // against correct behaviour. Build a directory we actually control and
+        // take its write permission away instead.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let readonly = dir.path().join("readonly");
+        fs::create_dir(&readonly).expect("create readonly dir");
+        let mut perms = fs::metadata(&readonly).expect("metadata").permissions();
+        perms.set_mode(0o500); // r-x------ : traversable, not writable
+        fs::set_permissions(&readonly, perms).expect("chmod");
+
+        // A privileged user ignores the write bit entirely, so the assertion
+        // below would be vacuous. Probe first and skip rather than assert
+        // something untrue of the environment.
+        if fs::create_dir(readonly.join("privilege_probe")).is_ok() {
+            return;
+        }
+
+        let result = PidFile::create(readonly.join("sub").join("test.pid"));
+        assert!(
+            result.is_err(),
+            "creating a pid file under a non-writable directory must fail"
+        );
     }
 
     #[test]
